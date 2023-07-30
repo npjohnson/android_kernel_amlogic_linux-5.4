@@ -89,3 +89,5 @@ dtb-y += a5_pxp.dtb
 dtb-y += a5_a113x2_av400_1g.dtb
 dtb-y += a5_a113x2_av409_2g.dtb
 dtb-y += android_overlay_dt.dtb
+dtb-y += kvim1s.dtb
+
