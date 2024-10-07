@@ -1003,10 +1003,17 @@ u64 bpf_jit_alloc_exec_limit(void)
 
 void *bpf_jit_alloc_exec(unsigned long size)
 {
+#ifdef CONFIG_AMLOGIC_VMALLOC_SHRINKER
+	return __vmalloc_node_range(size, PAGE_SIZE, BPF_JIT_REGION_START,
+				    BPF_JIT_REGION_END, GFP_KERNEL,
+				    PAGE_KERNEL, VM_SCAN, NUMA_NO_NODE,
+				    __builtin_return_address(0));
+#else
 	return __vmalloc_node_range(size, PAGE_SIZE, BPF_JIT_REGION_START,
 				    BPF_JIT_REGION_END, GFP_KERNEL,
 				    PAGE_KERNEL, 0, NUMA_NO_NODE,
 				    __builtin_return_address(0));
+#endif
 }
 
 void bpf_jit_free_exec(void *addr)
@@ -1014,7 +1021,7 @@ void bpf_jit_free_exec(void *addr)
 	return vfree(addr);
 }
 
-#ifdef CONFIG_CFI_CLANG
+#ifdef CONFIG_AMLOGIC_CFI_CLANG
 bool arch_bpf_jit_check_func(const struct bpf_prog *prog)
 {
 	const uintptr_t func = (const uintptr_t)prog->bpf_func;

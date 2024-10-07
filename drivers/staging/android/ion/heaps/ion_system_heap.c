@@ -246,7 +246,11 @@ static int ion_system_heap_create_pools(struct ion_page_pool **pools)
 		if (orders[i] > 0)
 			gfp_flags |= __GFP_NOWARN;
 
+#ifdef CONFIG_AMLOGIC_MODIFY
+		if (orders[i] >= 4)
+#else
 		if (orders[i] > 4)
+#endif
 			gfp_flags = high_order_gfp_flags;
 
 		pool = ion_page_pool_create(gfp_flags, orders[i]);

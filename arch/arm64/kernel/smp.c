@@ -51,6 +51,12 @@
 #include <asm/tlbflush.h>
 #include <asm/ptrace.h>
 #include <asm/virt.h>
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+#include <linux/amlogic/aml_cpuidle.h>
+#endif
+#ifdef CONFIG_AMLOGIC_VMAP
+#include <linux/amlogic/vmap_stack.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
@@ -77,9 +83,16 @@ enum ipi_msg_type {
 	IPI_TIMER,
 	IPI_IRQ_WORK,
 	IPI_WAKEUP,
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+	IPI_SUSPEND_NOTIFIER = 7,
+#endif
 	NR_IPI
 };
 
+#ifdef CONFIG_AMLOGIC_MODIFY
+bool panic_on_corefail;
+core_param(panic_on_corefail, panic_on_corefail, bool, 0644);
+#endif
 static int ipi_irq_base __read_mostly;
 static int nr_ipi __read_mostly = NR_IPI;
 static struct irq_desc *ipi_desc[NR_IPI] __read_mostly;
@@ -138,11 +151,25 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 					    msecs_to_jiffies(5000));
 
 		if (!cpu_online(cpu)) {
-			pr_crit("CPU%u: failed to come online\n", cpu);
+#ifdef CONFIG_AMLOGIC_MODIFY
+			if (panic_on_corefail)
+				panic("CPU%u: failed to come online\n", cpu);
+			else
+				pr_crit("CPU%u: failed to come online\n", cpu);
+#else
+				pr_crit("CPU%u: failed to come online\n", cpu);
+#endif
 			ret = -EIO;
 		}
 	} else {
-		pr_err("CPU%u: failed to boot: %d\n", cpu, ret);
+#ifdef CONFIG_AMLOGIC_MODIFY
+		if (panic_on_corefail)
+			panic("CPU%u: failed to boot: %d\n", cpu, ret);
+		else
+			pr_err("CPU%u: failed to boot: %d\n", cpu, ret);
+#else
+			pr_err("CPU%u: failed to boot: %d\n", cpu, ret);
+#endif
 		return ret;
 	}
 
@@ -210,6 +237,9 @@ asmlinkage notrace void secondary_start_kernel(void)
 
 	cpu = task_cpu(current);
 	set_my_cpu_offset(per_cpu_offset(cpu));
+#ifdef CONFIG_AMLOGIC_VMAP
+	__setup_vmap_stack(my_cpu_offset);
+#endif
 
 	/*
 	 * All kernel threads share the same mm context; grab a
@@ -261,7 +291,7 @@ asmlinkage notrace void secondary_start_kernel(void)
 	 * the CPU migration code to notice that the CPU is online
 	 * before we continue.
 	 */
-	pr_info("CPU%u: Booted secondary processor 0x%010lx [0x%08x]\n",
+	pr_debug("CPU%u: Booted secondary processor 0x%010lx [0x%08x]\n",
 					 cpu, (unsigned long)mpidr,
 					 read_cpuid_id());
 	update_cpu_boot_status(CPU_BOOT_SUCCESS);
@@ -442,6 +472,9 @@ void __init smp_cpus_done(unsigned int max_cpus)
 void __init smp_prepare_boot_cpu(void)
 {
 	set_my_cpu_offset(per_cpu_offset(smp_processor_id()));
+#ifdef CONFIG_AMLOGIC_VMAP
+	__setup_vmap_stack(my_cpu_offset);
+#endif
 	cpuinfo_store_boot_cpu();
 
 	/*
@@ -782,6 +815,9 @@ static const char *ipi_types[NR_IPI] __tracepoint_string = {
 	S(IPI_TIMER, "Timer broadcast interrupts"),
 	S(IPI_IRQ_WORK, "IRQ work interrupts"),
 	S(IPI_WAKEUP, "CPU wake-up interrupts"),
+#if defined(CONFIG_AMLOGIC_FREERTOS) || defined(CONFIG_AMLOGIC_CPUIDLE)
+	S(IPI_SHARE_FUNC, "CPU share func interrupts"),
+#endif
 };
 
 static void smp_cross_call(const struct cpumask *target, unsigned int ipinr);
@@ -826,6 +862,13 @@ void arch_send_wakeup_ipi_mask(const struct cpumask *mask)
 void arch_irq_work_raise(void)
 {
 	smp_cross_call(cpumask_of(smp_processor_id()), IPI_IRQ_WORK);
+}
+#endif
+
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+void arch_suspend_notifier(const struct cpumask *mask)
+{
+	smp_cross_call(mask, IPI_SUSPEND_NOTIFIER);
 }
 #endif
 
@@ -922,6 +965,14 @@ static void do_handle_IPI(int ipinr)
 		WARN_ONCE(!acpi_parking_protocol_valid(cpu),
 			  "CPU%u: Wake-up IPI outside the ACPI parking protocol\n",
 			  cpu);
+		break;
+#endif
+
+#if defined(CONFIG_AMLOGIC_CPUIDLE)
+	case IPI_SHARE_FUNC:
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+		aml_suspend_power_handler();
+#endif
 		break;
 #endif
 

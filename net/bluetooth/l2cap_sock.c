@@ -1755,7 +1755,7 @@ int __init l2cap_init_sockets(void)
 		goto error;
 	}
 
-	BT_INFO("L2CAP socket layer initialized");
+	BT_DBG("L2CAP socket layer initialized");
 
 	return 0;
 

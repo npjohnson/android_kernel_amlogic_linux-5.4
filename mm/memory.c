@@ -2444,13 +2444,25 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		goto oom;
 
 	if (is_zero_pfn(pte_pfn(vmf->orig_pte))) {
+	#ifdef CONFIG_AMLOGIC_CMA
+		gfp_t tmp_flag = __GFP_MOVABLE | __GFP_NO_CMA;
+
+		new_page = __alloc_zeroed_user_highpage(tmp_flag, vma,
+							vmf->address);
+	#else
 		new_page = alloc_zeroed_user_highpage_movable(vma,
 							      vmf->address);
+	#endif
 		if (!new_page)
 			goto oom;
 	} else {
+	#ifdef CONFIG_AMLOGIC_CMA
+		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE | __GFP_NO_CMA,
+					  vma, vmf->address);
+	#else
 		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
 				vmf->address);
+	#endif
 		if (!new_page)
 			goto oom;
 
@@ -2925,7 +2937,9 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 				__SetPageLocked(page);
 				__SetPageSwapBacked(page);
 				set_page_private(page, entry.val);
-				lru_cache_add_anon(page);
+
+				lru_cache_add(page);
+
 				swap_readpage(page, true);
 			}
 		} else {
@@ -4032,6 +4046,48 @@ unlock:
 	return 0;
 }
 
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+static bool __restore_locked_page(struct page *page, struct vm_area_struct *vma,
+			 unsigned long addr, void *arg)
+{
+	int ret;
+	pte_t old_pte, *pte;
+	spinlock_t *ptl;	/* pte lock */
+
+	if (vma->vm_flags & (VM_LOCKED | VM_LOCKONFAULT)) {
+		if (addr < vma->vm_start || addr >= vma->vm_end)
+			return -EFAULT;
+		if (!page_count(page))
+			return -EINVAL;
+
+		pte = get_locked_pte(vma->vm_mm, addr, &ptl);
+		if (!pte)
+			return true;
+		old_pte = *pte;
+		pte_unmap_unlock(pte, ptl);
+		/* already refaulted */
+		if (pte_valid(old_pte) && pte_pfn(old_pte) == page_to_pfn(page))
+			return true;
+
+		ret = insert_page(vma, addr, page, vma->vm_page_prot);
+		pr_debug("%s, restore page:%lx for addr:%lx, vma:%px, ret:%d, old_pte:%llx\n",
+			__func__,  page_to_pfn(page), addr, vma, ret,
+			(unsigned long long)pte_val(old_pte));
+		return ret ? false : true;
+	}
+	return true; /* keep loop */
+}
+
+void restore_locked_page(struct page *page)
+{
+	struct rmap_walk_control rwc = {
+		.rmap_one = __restore_locked_page,
+	};
+
+	rmap_walk(page, &rwc);
+}
+#endif
+
 /*
  * By the time we get here, we already hold the mm semaphore
  *
@@ -4047,7 +4103,13 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		.flags = flags,
 		.pgoff = linear_page_index(vma, address),
 		.gfp_mask = __get_fault_gfp_mask(vma),
+	#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+		.pte  = NULL,
+	#endif
 	};
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	struct address_space *mapping = NULL;
+#endif
 	unsigned int dirty = flags & FAULT_FLAG_WRITE;
 	struct mm_struct *mm = vma->vm_mm;
 	pgd_t *pgd;
@@ -4118,7 +4180,45 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		}
 	}
 
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	ret = handle_pte_fault(&vmf);
+	/* Android lock it but not access it */
+	if (vma->vm_file && !(vma->vm_flags & VM_LOCKED))
+		mapping = vma->vm_file->f_mapping;
+	if (mapping && test_bit(AS_LOCK_MAPPING, &mapping->flags) && !ret) {
+		struct page *page;
+		spinlock_t *ptl; /* page table lock */
+		pte_t *ptep, pte;
+		int need_restore = 0;
+
+		ptep = pte_offset_map_lock(mm, vmf.pmd, address, &ptl);
+		pte  = *ptep;
+		page = vm_normal_page(vmf.vma, address, pte);
+		if (page && !PageMlocked(page)) {
+			if (page->mapping && trylock_page(page)) {
+				pr_debug("fault on locked, new pte:%llx, addr:%lx, page:%lx, %lx, ret:%x, mapping:%px f:%lx\n",
+					(unsigned long long)pte_val(pte),
+					address, page_to_pfn(page),
+					page->flags, ret,
+					mapping, mapping->flags);
+				lru_add_drain();  /* push cached pages to LRU */
+				mlock_vma_page(page);
+				/* Set this flag to avoid shrink again */
+			#ifndef CONFIG_KASAN
+				SetPageCmaAllocating(page);
+			#endif
+				unlock_page(page);
+				need_restore = 1;
+			}
+		}
+		pte_unmap_unlock(ptep, ptl);
+		if (need_restore)
+			restore_locked_page(page);
+	}
+	return ret;
+#else
 	return handle_pte_fault(&vmf);
+#endif
 }
 
 /*

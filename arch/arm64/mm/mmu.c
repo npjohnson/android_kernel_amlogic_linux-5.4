@@ -273,6 +273,10 @@ static void alloc_init_cont_pmd(pud_t *pudp, unsigned long addr,
 static inline bool use_1G_block(unsigned long addr, unsigned long next,
 			unsigned long phys)
 {
+#ifdef CONFIG_AMLOGIC_CMA
+	/* we need create full 2nd page table */
+	return false;
+#else
 	if (PAGE_SHIFT != 12)
 		return false;
 
@@ -280,6 +284,7 @@ static inline bool use_1G_block(unsigned long addr, unsigned long next,
 		return false;
 
 	return true;
+#endif
 }
 
 static void alloc_init_pud(pgd_t *pgdp, unsigned long addr, unsigned long end,
@@ -584,6 +589,8 @@ early_param("rodata", parse_rodata);
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
 static int __init map_entry_trampoline(void)
 {
+	int i;
+
 	pgprot_t prot = rodata_enabled ? PAGE_KERNEL_ROX : PAGE_KERNEL_EXEC;
 	phys_addr_t pa_start = __pa_symbol(__entry_tramp_text_start);
 
@@ -592,11 +599,15 @@ static int __init map_entry_trampoline(void)
 
 	/* Map only the text into the trampoline page table */
 	memset(tramp_pg_dir, 0, PGD_SIZE);
-	__create_pgd_mapping(tramp_pg_dir, pa_start, TRAMP_VALIAS, PAGE_SIZE,
-			     prot, __pgd_pgtable_alloc, 0);
+	__create_pgd_mapping(tramp_pg_dir, pa_start, TRAMP_VALIAS,
+			     entry_tramp_text_size(), prot,
+			     __pgd_pgtable_alloc, NO_BLOCK_MAPPINGS);
 
 	/* Map both the text and data into the kernel page table */
-	__set_fixmap(FIX_ENTRY_TRAMP_TEXT, pa_start, prot);
+	for (i = 0; i < DIV_ROUND_UP(entry_tramp_text_size(), PAGE_SIZE); i++)
+		__set_fixmap(FIX_ENTRY_TRAMP_TEXT1 - i,
+			     pa_start + i * PAGE_SIZE, prot);
+
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		extern char __entry_tramp_data_start[];
 
@@ -734,6 +745,28 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 	return vmemmap_populate_basepages(start, end, node);
 }
 #else	/* !ARM64_SWAPPER_USES_SECTION_MAPS */
+
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+static int __meminit check_pfn_overflow(unsigned long pfn)
+{
+	unsigned long pfn_up;
+	unsigned long size;
+	/*
+	 * reserve pfn is larger than max_pfn, we don't need to reserve memory
+	 * this can help for memory less than 1GB platform
+	 */
+	size = sizeof(struct page);
+	pfn_up = ALIGN(max_pfn * size, PMD_SIZE);
+	pfn_up = (pfn_up + size - 1) / size;	/* round up */
+	if (pfn >= pfn_up) {
+		pr_debug("%s, wrong pfn:%lx, max:%lx, up:%lx\n",
+			__func__, pfn, max_pfn, pfn_up);
+		return -ERANGE;
+	}
+	return 0;
+}
+#endif /* CONFIG_AMLOGIC_MEMORY_EXTEND */
+
 int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 		struct vmem_altmap *altmap)
 {
@@ -742,10 +775,24 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 	pgd_t *pgdp;
 	pud_t *pudp;
 	pmd_t *pmdp;
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	struct page *page;
+	bool in_vmap = false;
+
+	page = (struct page *)start;
+	/* avoid check for KASAN */
+	if (start >= VMEMMAP_START)
+		in_vmap = true;
+#endif /* CONFIG_AMLOGIC_MEMORY_EXTEND */
 
 	do {
 		next = pmd_addr_end(addr, end);
 
+	#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+		/* page address may not just same as next */
+		while (in_vmap && ((unsigned long)page) < next)
+			page++;
+	#endif /* CONFIG_AMLOGIC_MEMORY_EXTEND */
 		pgdp = vmemmap_pgd_populate(addr, node);
 		if (!pgdp)
 			return -ENOMEM;
@@ -765,6 +812,10 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
 			pmd_set_huge(pmdp, __pa(p), __pgprot(PROT_SECT_NORMAL));
 		} else
 			vmemmap_verify((pte_t *)pmdp, node, addr, next);
+		#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+		if (in_vmap && check_pfn_overflow(page_to_pfn(page)))
+			break;
+		#endif /* CONFIG_AMLOGIC_MODIFY */
 	} while (addr = next, addr != end);
 
 	return 0;

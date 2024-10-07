@@ -2214,7 +2214,11 @@ static void xhci_add_in_port(struct xhci_hcd *xhci, unsigned int num_ports,
 		 (temp & XHCI_HLC)) {
 		xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			       "xHCI 1.0: support USB2 hardware lpm");
+#ifdef CONFIG_AMLOGIC_USB
+		xhci->quirks |= XHCI_HW_LPM_DISABLE;
+#else
 		xhci->hw_lpm_support = 1;
+#endif
 	}
 
 	port_offset--;
@@ -2351,6 +2355,11 @@ static int xhci_setup_port_arrays(struct xhci_hcd *xhci, gfp_t flags)
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 		       "Found %u USB 2.0 ports and %u USB 3.0 ports.",
 		       xhci->usb2_rhub.num_ports, xhci->usb3_rhub.num_ports);
+
+#ifdef CONFIG_AMLOGIC_USB
+	if ((xhci->quirks & XHCI_AML_SUPER_SPEED_SUPPORT) == 0)
+		xhci->usb3_rhub.num_ports = 0;
+#endif
 
 	/* Place limits on the number of roothub ports so that the hub
 	 * descriptors aren't longer than the USB core will allocate.

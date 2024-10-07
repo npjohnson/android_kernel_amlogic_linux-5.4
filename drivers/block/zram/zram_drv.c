@@ -207,14 +207,17 @@ static inline void zram_fill_page(void *ptr, unsigned long len,
 
 static bool page_same_filled(void *ptr, unsigned long *element)
 {
-	unsigned int pos;
 	unsigned long *page;
 	unsigned long val;
+	unsigned int pos, last_pos = PAGE_SIZE / sizeof(*page) - 1;
 
 	page = (unsigned long *)ptr;
 	val = page[0];
 
-	for (pos = 1; pos < PAGE_SIZE / sizeof(*page); pos++) {
+	if (val != page[last_pos])
+		return false;
+
+	for (pos = 1; pos < last_pos; pos++) {
 		if (val != page[pos])
 			return false;
 	}
@@ -1160,7 +1163,12 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 	size_t num_pages;
 
 	num_pages = disksize >> PAGE_SHIFT;
+#ifdef CONFIG_AMLOGIC_VMALLOC_SHRINKER
+	zram->table = vmalloc_scan(array_size(num_pages, sizeof(*zram->table)),
+				   GFP_KERNEL, PAGE_KERNEL);
+#else
 	zram->table = vzalloc(array_size(num_pages, sizeof(*zram->table)));
+#endif
 	if (!zram->table)
 		return false;
 
@@ -1381,9 +1389,18 @@ compress_again:
 	if (!handle) {
 		zcomp_stream_put(zram->comp);
 		atomic64_inc(&zram->stats.writestall);
+	#ifdef CONFIG_AMLOGIC_MODIFY
+		handle = zs_malloc(zram->mem_pool, comp_len,
+				GFP_NOIO |
+				__GFP_HIGHMEM |
+				__GFP_NOWARN |
+				__GFP_RETRY_MAYFAIL |
+				__GFP_MOVABLE);
+	#else
 		handle = zs_malloc(zram->mem_pool, comp_len,
 				GFP_NOIO | __GFP_HIGHMEM |
 				__GFP_MOVABLE);
+	#endif
 		if (handle)
 			goto compress_again;
 		return -ENOMEM;

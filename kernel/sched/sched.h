@@ -82,6 +82,9 @@
 # define SCHED_WARN_ON(x)	({ (void)(x), 0; })
 #endif
 
+#ifdef CONFIG_AMLOGIC_MODIFY
+extern int sysctl_sched_rt_runtime;
+#endif
 struct rq;
 struct cpuidle_state;
 
@@ -1077,6 +1080,10 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define task_rq(p)		cpu_rq(task_cpu(p))
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
+
+#ifdef CONFIG_AMLOGIC_DEBUG_LOCKUP
+struct task_struct *get_current_cpu_task(int cpu);
+#endif
 
 extern void update_rq_clock(struct rq *rq);
 

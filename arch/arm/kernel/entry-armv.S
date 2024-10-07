@@ -36,16 +36,39 @@
 /*
  * Interrupt handling.
  */
+#ifdef CONFIG_AMLOGIC_VMAP
+	.macro	irq_handler, vmap=0
+	.if \vmap
+	mov	r8, sp			/* back up sp */
+	mov	r0, sp
+	bl	irq_stack_entry		/* switch IRQ stack */
+	mov	sp, r0
+	.endif
+#else
 	.macro	irq_handler
+#endif
 #ifdef CONFIG_GENERIC_IRQ_MULTI_HANDLER
 	ldr	r1, =handle_arch_irq
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap
+	mov	r0, r8
+	.else
 	mov	r0, sp
+	.endif
+#else
+	mov	r0, sp
+#endif
 	badr	lr, 9997f
 	ldr	pc, [r1]
 #else
 	arch_irq_handler_default
 #endif
 9997:
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap
+	mov	sp, r8			/* switch stack back to task stack */
+	.endif
+#endif
 	.endm
 
 	.macro	pabt_helper
@@ -143,10 +166,26 @@ ENDPROC(__und_invalid)
 #define SPFIX(code...)
 #endif
 
+#ifdef CONFIG_AMLOGIC_VMAP
+	.macro	svc_entry, stack_hole=0, trace=1, uaccess=1, vmap=0
+#else
 	.macro	svc_entry, stack_hole=0, trace=1, uaccess=1
+#endif
  UNWIND(.fnstart		)
  UNWIND(.save {r0 - pc}		)
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap
+	/* keep using stack of abt mode */
+	str	sp, [r0, #TI_VMAP_BACK_SP]
+	sub	sp, r0, #(SVC_REGS_SIZE + \stack_hole - 4)
+	.else
 	sub	sp, sp, #(SVC_REGS_SIZE + \stack_hole - 4)
+	.endif
+#else /* !CONFIG_AMLOGIC_VMAP */
+	sub	sp, sp, #(SVC_REGS_SIZE + \stack_hole - 4)
+#endif /* CONFIG_AMLOGIC_VMAP */
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if !\vmap
 #ifdef CONFIG_THUMB2_KERNEL
  SPFIX(	str	r0, [sp]	)	@ temporarily saved
  SPFIX(	mov	r0, sp		)
@@ -156,13 +195,27 @@ ENDPROC(__und_invalid)
  SPFIX(	tst	sp, #4		)
 #endif
  SPFIX(	subeq	sp, sp, #4	)
+	.endif
+#else
+ SPFIX(	tst	sp, #4		)
+ SPFIX(	subeq	sp, sp, #4	)
+#endif
 	stmia	sp, {r1 - r12}
 
 	ldmia	r0, {r3 - r5}
 	add	r7, sp, #S_SP - 4	@ here for interlock avoidance
 	mov	r6, #-1			@  ""  ""      ""       ""
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap
+	ldr     r2, [sp, #(TI_VMAP_BACK_SP + SVC_REGS_SIZE - 4)]
+	.else
 	add	r2, sp, #(SVC_REGS_SIZE + \stack_hole - 4)
  SPFIX(	addeq	r2, r2, #4	)
+	.endif
+#else
+	add	r2, sp, #(SVC_REGS_SIZE + \stack_hole - 4)
+ SPFIX(	addeq	r2, r2, #4	)
+#endif
 	str	r3, [sp, #-4]!		@ save the "real" r0 copied
 					@ from the exception stack
 
@@ -179,7 +232,50 @@ ENDPROC(__und_invalid)
 	@
 	stmia	r7, {r2 - r6}
 
+#ifdef CONFIG_AMLOGIC_VMAP
+	.if \vmap
+	/*
+	 * get fault task thread info
+	 */
+	ldr	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_BACK_SP)]
+#ifdef CONFIG_KASAN
+	/* FAR may be kasan shadow then nobody will handle it */
+	mrc	p15, 0, r1, c6, c0, 0		@ get FAR
+	bl	pmd_check
+#endif
+	/* sp may not access able when switch task */
+	mov	r1, r0
+	bl	pmd_check
+	mov	tsk, r0
+	mov 	tsk, tsk, lsr #THREAD_SIZE_ORDER + PAGE_SHIFT
+	mov	tsk, tsk, lsl #THREAD_SIZE_ORDER + PAGE_SHIFT
+	add	tsk, tsk, #TI_THREAD_SIZE
+	sub	tsk, tsk, #TI_THREAD_INFO_SIZE
+
+	/*
+	 * copy some important member of thread_info from current
+	 * task to vmap stack
+	 */
+	ldr	r0, [tsk, #TI_FLAGS]
+	ldr	r1, [tsk, #TI_PREEMPT]
+	str	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_FLAGS)]
+	str	r1, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_PREEMPT)]
+
+	ldr	r0, [tsk, #TI_ADDR_LIMIT]
+	ldr	r1, [tsk, #TI_TASK]
+	str	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_ADDR_LIMIT)]
+	str	r1, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_TASK)]
+
+	ldr	r0, [tsk, #TI_CPU]
+	ldr	r1, [tsk, #TI_CPU_DOMAIN]
+	str	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_CPU)]
+	str	r1, [sp, #(SVC_REGS_SIZE + TI_VMAP_RESERVE_LEN + TI_CPU_DOMAIN)]
+	.else
 	get_thread_info tsk
+	.endif
+#else
+	get_thread_info tsk
+#endif
 	uaccess_entry tsk, r0, r1, r2, \uaccess
 
 	.if \trace
@@ -191,7 +287,34 @@ ENDPROC(__und_invalid)
 
 	.align	5
 __dabt_svc:
+#ifdef CONFIG_AMLOGIC_VMAP
+	svc_entry uaccess=0, vmap=1
+	mrc	p15, 0, r1, c5, c0, 0		@ get FSR
+	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
+	mov	r2, sp
+	uaccess_disable ip			@ disable userspace access
+	bl	handle_vmap_fault
+	cmp	r0, #0
+	bne	.L__dabt_svc_next
+	/* handled by vmap fault handler */
+	svc_exit r5, vmap=1			@ return from exception
+.L__dabt_svc_next:
+	/* re-build context for normal abort handler */
+	ldr	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_BACK_SP)]
+	sub	r0, #SVC_REGS_SIZE
+	tst	r0, #4
+	subne	r0, r0, #4
+	mov	r1, sp
+	mov	r2, #SVC_REGS_SIZE
+#ifdef CONFIG_KASAN
+	bl	__memcpy		/* copy back sp	*/
+#else
+	bl	memcpy			/* copy back sp	*/
+#endif
+	mov	sp, r0
+#else
 	svc_entry uaccess=0
+#endif
 	mov	r2, sp
 	dabt_helper
  THUMB(	ldr	r5, [sp, #S_PSR]	)	@ potentially updated CPSR
@@ -202,7 +325,11 @@ ENDPROC(__dabt_svc)
 	.align	5
 __irq_svc:
 	svc_entry
+#ifdef CONFIG_AMLOGIC_VMAP
+	irq_handler vmap=1
+#else
 	irq_handler
+#endif
 
 #ifdef CONFIG_PREEMPT
 	ldr	r8, [tsk, #TI_PREEMPT]		@ get preempt count
@@ -268,10 +395,30 @@ ENDPROC(__und_svc)
 
 	.align	5
 __pabt_svc:
+#ifdef CONFIG_AMLOGIC_VMAP
+	svc_entry vmap=1	/* keep using abt stack */
+	/* re-build context for normal abort handler */
+	ldr	r0, [sp, #(SVC_REGS_SIZE + TI_VMAP_BACK_SP)]
+	sub	r0, #SVC_REGS_SIZE
+	tst	r0, #4
+	subne	r0, r0, #4
+	mov	r1, sp
+	mov	r2, #SVC_REGS_SIZE
+#ifdef CONFIG_KASAN
+	bl	__memcpy		/* copy back sp	*/
+#else
+	bl	memcpy			/* copy back sp	*/
+#endif
+	mov	sp, r0
+	mov	r2, sp				@ regs
+	pabt_helper
+	svc_exit r5				@ return from exception
+#else
 	svc_entry
 	mov	r2, sp				@ regs
 	pabt_helper
 	svc_exit r5				@ return from exception
+#endif
  UNWIND(.fnend		)
 ENDPROC(__pabt_svc)
 
@@ -406,7 +553,8 @@ ENDPROC(__fiq_abt)
 	@ if it was interrupted in a critical region.  Here we
 	@ perform a quick test inline since it should be false
 	@ 99.9999% of the time.  The rest is done out of line.
-	cmp	r4, #TASK_SIZE
+	ldr	r0, =TASK_SIZE
+	cmp	r4, r0
 	blhs	kuser_cmpxchg64_fixup
 #endif
 #endif
@@ -758,6 +906,7 @@ ENTRY(__switch_to)
 	ldr	r6, [r2, #TI_CPU_DOMAIN]
 #endif
 	switch_tls r1, r4, r5, r3, r7
+#ifndef CONFIG_AMLOGIC_STACKPROTECTOR
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_SMP)
 	ldr	r7, [r2, #TI_TASK]
 	ldr	r8, =__stack_chk_guard
@@ -766,6 +915,7 @@ ENTRY(__switch_to)
 	.endif
 	ldr	r7, [r7, #TSK_STACK_CANARY & IMM12_MASK]
 #endif
+#endif /* CONFIG_AMLOGIC_STACKPROTECTOR */
 #ifdef CONFIG_CPU_USE_DOMAINS
 	mcr	p15, 0, r6, c3, c0, 0		@ Set domain register
 #endif
@@ -774,9 +924,11 @@ ENTRY(__switch_to)
 	ldr	r0, =thread_notify_head
 	mov	r1, #THREAD_NOTIFY_SWITCH
 	bl	atomic_notifier_call_chain
+#ifndef CONFIG_AMLOGIC_STACKPROTECTOR
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_SMP)
 	str	r7, [r8]
 #endif
+#endif /* CONFIG_AMLOGIC_STACKPROTECTOR */
  THUMB(	mov	ip, r4			   )
 	mov	r0, r5
  ARM(	ldmia	r4, {r4 - sl, fp, sp, pc}  )	@ Load all regs saved previously
@@ -1005,12 +1157,11 @@ vector_\name:
 	sub	lr, lr, #\correction
 	.endif
 
-	@
-	@ Save r0, lr_<exception> (parent PC) and spsr_<exception>
-	@ (parent CPSR)
-	@
+	@ Save r0, lr_<exception> (parent PC)
 	stmia	sp, {r0, lr}		@ save r0, lr
-	mrs	lr, spsr
+
+	@ Save spsr_<exception> (parent CPSR)
+2:	mrs	lr, spsr
 	str	lr, [sp, #8]		@ save spsr
 
 	@
@@ -1031,6 +1182,44 @@ vector_\name:
 	movs	pc, lr			@ branch to handler in SVC mode
 ENDPROC(vector_\name)
 
+#ifdef CONFIG_HARDEN_BRANCH_HISTORY
+	.subsection 1
+	.align 5
+vector_bhb_loop8_\name:
+	.if \correction
+	sub	lr, lr, #\correction
+	.endif
+
+	@ Save r0, lr_<exception> (parent PC)
+	stmia	sp, {r0, lr}
+
+	@ bhb workaround
+	mov	r0, #8
+3:	b	. + 4
+	subs	r0, r0, #1
+	bne	3b
+	dsb
+	isb
+	b	2b
+ENDPROC(vector_bhb_loop8_\name)
+
+vector_bhb_bpiall_\name:
+	.if \correction
+	sub	lr, lr, #\correction
+	.endif
+
+	@ Save r0, lr_<exception> (parent PC)
+	stmia	sp, {r0, lr}
+
+	@ bhb workaround
+	mcr	p15, 0, r0, c7, c5, 6	@ BPIALL
+	@ isb not needed due to "movs pc, lr" in the vector stub
+	@ which gives a "context synchronisation".
+	b	2b
+ENDPROC(vector_bhb_bpiall_\name)
+	.previous
+#endif
+
 	.align	2
 	@ handler addresses follow this label
 1:
@@ -1039,6 +1228,10 @@ ENDPROC(vector_\name)
 	.section .stubs, "ax", %progbits
 	@ This must be the first word
 	.word	vector_swi
+#ifdef CONFIG_HARDEN_BRANCH_HISTORY
+	.word	vector_bhb_loop8_swi
+	.word	vector_bhb_bpiall_swi
+#endif
 
 vector_rst:
  ARM(	swi	SYS_ERROR0	)
@@ -1153,8 +1346,10 @@ vector_addrexcptn:
  * FIQ "NMI" handler
  *-----------------------------------------------------------------------------
  * Handle a FIQ using the SVC stack allowing FIQ act like NMI on x86
- * systems.
+ * systems. This must be the last vector stub, so lets place it in its own
+ * subsection.
  */
+	.subsection 2
 	vector_stub	fiq, FIQ_MODE, 4
 
 	.long	__fiq_usr			@  0  (USR_26 / USR_32)
@@ -1186,6 +1381,30 @@ vector_addrexcptn:
 	W(b)	vector_addrexcptn
 	W(b)	vector_irq
 	W(b)	vector_fiq
+
+#ifdef CONFIG_HARDEN_BRANCH_HISTORY
+	.section .vectors.bhb.loop8, "ax", %progbits
+.L__vectors_bhb_loop8_start:
+	W(b)	vector_rst
+	W(b)	vector_bhb_loop8_und
+	W(ldr)	pc, .L__vectors_bhb_loop8_start + 0x1004
+	W(b)	vector_bhb_loop8_pabt
+	W(b)	vector_bhb_loop8_dabt
+	W(b)	vector_addrexcptn
+	W(b)	vector_bhb_loop8_irq
+	W(b)	vector_bhb_loop8_fiq
+
+	.section .vectors.bhb.bpiall, "ax", %progbits
+.L__vectors_bhb_bpiall_start:
+	W(b)	vector_rst
+	W(b)	vector_bhb_bpiall_und
+	W(ldr)	pc, .L__vectors_bhb_bpiall_start + 0x1008
+	W(b)	vector_bhb_bpiall_pabt
+	W(b)	vector_bhb_bpiall_dabt
+	W(b)	vector_addrexcptn
+	W(b)	vector_bhb_bpiall_irq
+	W(b)	vector_bhb_bpiall_fiq
+#endif
 
 	.data
 	.align	2

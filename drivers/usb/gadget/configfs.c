@@ -25,6 +25,10 @@ static struct device *android_device;
 static int index;
 static int gadget_index;
 
+#ifdef CONFIG_AMLOGIC_USB
+static struct gadget_info *gi_backup;
+#endif
+
 struct device *create_function_device(char *name)
 {
 	if (android_device && !IS_ERR(android_device))
@@ -36,6 +40,30 @@ struct device *create_function_device(char *name)
 EXPORT_SYMBOL_GPL(create_function_device);
 #endif
 
+#ifdef CONFIG_AMLOGIC_USB
+struct gadget_lock {
+	struct wakeup_source *wakesrc;
+	bool held;
+};
+
+static struct gadget_lock Gadget_Lock;
+
+static void gadget_hold(struct gadget_lock *lock)
+{
+	if (!lock->held) {
+		__pm_stay_awake(lock->wakesrc);
+		lock->held = true;
+	}
+}
+
+static void gadget_drop(struct gadget_lock *lock)
+{
+	if (lock->held) {
+		__pm_relax(lock->wakesrc);
+		lock->held = false;
+	}
+}
+#endif
 int check_user_usb_string(const char *name,
 		struct usb_gadget_strings *stringtab_dev)
 {
@@ -1329,9 +1357,11 @@ static int configfs_composite_bind(struct usb_gadget *gadget,
 	gi->unbind = 0;
 	cdev->gadget = gadget;
 	set_gadget_data(gadget, cdev);
+
 	ret = composite_dev_prepare(composite, cdev);
 	if (ret)
 		return ret;
+
 	/* and now the gadget bind */
 	ret = -EINVAL;
 
@@ -1452,6 +1482,7 @@ err_purge_funcs:
 	purge_configs_funcs(gi);
 err_comp_cleanup:
 	composite_dev_cleanup(cdev);
+
 	return ret;
 }
 
@@ -1491,16 +1522,24 @@ static void android_work(struct work_struct *data)
 		kobject_uevent_env(&gi->dev->kobj, KOBJ_CHANGE, configured);
 		pr_info("%s: sent uevent %s\n", __func__, configured[0]);
 		uevent_sent = true;
+#ifdef CONFIG_AMLOGIC_USB
+		if (Gadget_Lock.wakesrc)
+			gadget_hold(&Gadget_Lock);
+#endif
 	}
 
 	if (status[2]) {
 		kobject_uevent_env(&gi->dev->kobj, KOBJ_CHANGE, disconnected);
 		pr_info("%s: sent uevent %s\n", __func__, disconnected[0]);
 		uevent_sent = true;
+#ifdef CONFIG_AMLOGIC_USB
+		if (Gadget_Lock.wakesrc)
+			gadget_drop(&Gadget_Lock);
+#endif
 	}
 
 	if (!uevent_sent) {
-		pr_info("%s: did not send uevent (%d %d %p)\n", __func__,
+		pr_debug("%s: did not send uevent (%d %d %p)\n", __func__,
 			gi->connected, gi->sw_connected, cdev->config);
 	}
 }
@@ -1525,6 +1564,7 @@ static void configfs_composite_unbind(struct usb_gadget *gadget)
 	purge_configs_funcs(gi);
 	composite_dev_cleanup(cdev);
 	usb_ep_autoconfig_reset(cdev->gadget);
+
 	spin_lock_irqsave(&gi->spinlock, flags);
 	cdev->gadget = NULL;
 	set_gadget_data(gadget, NULL);
@@ -1842,6 +1882,10 @@ static struct config_group *gadgets_make(
 	if (android_device_create(gi) < 0)
 		goto err;
 
+#ifdef CONFIG_AMLOGIC_USB
+	gi_backup = gi;
+#endif
+
 	return &gi->group;
 
 err:
@@ -1888,6 +1932,53 @@ void unregister_gadget_item(struct config_item *item)
 }
 EXPORT_SYMBOL_GPL(unregister_gadget_item);
 
+#ifdef CONFIG_AMLOGIC_USB
+int crg_otg_write_UDC(const char *udc_name)
+{
+	struct gadget_info *gi = gi_backup;
+	char *name;
+	int ret;
+	size_t len;
+
+	if (!gi)
+		return -ENOMEM;
+	len = strlen(udc_name);
+
+	name = kstrdup(udc_name, GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+	if (name[len - 1] == '\n')
+		name[len - 1] = '\0';
+
+	mutex_lock(&gi->lock);
+
+	if (!strlen(name) || strcmp(name, "none") == 0) {
+		ret = unregister_gadget(gi);
+		if (ret)
+			goto err;
+		kfree(name);
+	} else {
+		if (gi->composite.gadget_driver.udc_name) {
+			ret = -EBUSY;
+			goto err;
+		}
+		gi->composite.gadget_driver.udc_name = name;
+		ret = usb_gadget_probe_driver(&gi->composite.gadget_driver);
+		if (ret) {
+			gi->composite.gadget_driver.udc_name = NULL;
+			goto err;
+		}
+	}
+	mutex_unlock(&gi->lock);
+	return 0;
+err:
+	kfree(name);
+	mutex_unlock(&gi->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(crg_otg_write_UDC);
+#endif
+
 static int __init gadget_cfs_init(void)
 {
 	int ret;
@@ -1902,6 +1993,12 @@ static int __init gadget_cfs_init(void)
 		return PTR_ERR(android_class);
 #endif
 
+#ifdef CONFIG_AMLOGIC_USB
+	Gadget_Lock.wakesrc = wakeup_source_register(NULL, "gadget-connect");
+	if (!Gadget_Lock.wakesrc)
+		pr_info("----register  gadget-connect wakeup source  failed\n");
+#endif
+
 	return ret;
 }
 module_init(gadget_cfs_init);
@@ -1914,5 +2011,8 @@ static void __exit gadget_cfs_exit(void)
 		class_destroy(android_class);
 #endif
 
+#ifdef CONFIG_AMLOGIC_USB
+	wakeup_source_unregister(Gadget_Lock.wakesrc);
+#endif
 }
 module_exit(gadget_cfs_exit);

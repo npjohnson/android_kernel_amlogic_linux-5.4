@@ -1643,7 +1643,7 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 	struct work_struct *work = &dwork->work;
 
 	WARN_ON_ONCE(!wq);
-#ifndef CONFIG_CFI_CLANG
+#ifndef CONFIG_AMLOGIC_CFI_CLANG
 	WARN_ON_ONCE(timer->function != delayed_work_timer_fn);
 #endif
 	WARN_ON_ONCE(timer_pending(timer));
@@ -2181,11 +2181,20 @@ static void process_one_work(struct worker *worker, struct work_struct *work)
 __releases(&pool->lock)
 __acquires(&pool->lock)
 {
+#ifdef CONFIG_AMLOGIC_MODIFY
+	int work_color;
+	struct worker *collision;
+	bool cpu_intensive;
+	struct pool_workqueue *pwq = get_work_pwq(work);
+	struct worker_pool *pool = worker->pool;
+#else
 	struct pool_workqueue *pwq = get_work_pwq(work);
 	struct worker_pool *pool = worker->pool;
 	bool cpu_intensive = pwq->wq->flags & WQ_CPU_INTENSIVE;
 	int work_color;
 	struct worker *collision;
+#endif
+
 #ifdef CONFIG_LOCKDEP
 	/*
 	 * It is permissible to free the struct work_struct from
@@ -2197,6 +2206,16 @@ __acquires(&pool->lock)
 	struct lockdep_map lockdep_map;
 
 	lockdep_copy_map(&lockdep_map, &work->lockdep_map);
+#endif
+#ifdef CONFIG_AMLOGIC_MODIFY
+	if (!pwq) {
+		WARN_ONCE(1, "<%s> pwq_NULL <%lx> <%ps>, <%ps> %s\n",
+			__func__, atomic_long_read(&work->data),
+			work->func, worker->current_func, worker->desc);
+		return;
+	}
+
+	cpu_intensive = pwq->wq->flags & WQ_CPU_INTENSIVE;
 #endif
 	/* ensure we're on the correct CPU */
 	WARN_ON_ONCE(!(pool->flags & POOL_DISASSOCIATED) &&

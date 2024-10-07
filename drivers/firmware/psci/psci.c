@@ -27,6 +27,10 @@
 #include <asm/smp_plat.h>
 #include <asm/suspend.h>
 
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+#include <linux/cpumask.h>
+#include <linux/amlogic/aml_cpuidle.h>
+#endif
 #include <trace/hooks/psci.h>
 
 /*
@@ -64,6 +68,21 @@ struct psci_operations psci_ops = {
 	.conduit = PSCI_CONDUIT_NONE,
 	.smccc_version = SMCCC_VERSION_1_0,
 };
+
+enum arm_smccc_conduit arm_smccc_1_1_get_conduit(void)
+{
+	if (psci_ops.smccc_version < SMCCC_VERSION_1_1)
+		return SMCCC_CONDUIT_NONE;
+
+	switch (psci_ops.conduit) {
+	case PSCI_CONDUIT_SMC:
+		return SMCCC_CONDUIT_SMC;
+	case PSCI_CONDUIT_HVC:
+		return SMCCC_CONDUIT_HVC;
+	default:
+		return SMCCC_CONDUIT_NONE;
+	}
+}
 
 typedef unsigned long (psci_fn)(unsigned long, unsigned long,
 				unsigned long, unsigned long);
@@ -172,6 +191,11 @@ static int psci_cpu_suspend(u32 state, unsigned long entry_point)
 	if (deny)
 		return -EPERM;
 
+#ifdef CONFIG_AMLOGIC_CPUIDLE
+	if (is_aml_cpuidle_enabled())
+		arch_suspend_notifier(cpumask_of(0));
+#endif
+
 	fn = psci_function_id[PSCI_FN_CPU_SUSPEND];
 	err = invoke_psci_fn(fn, state, entry_point, 0);
 	return psci_to_linux_errno(err);
@@ -245,7 +269,7 @@ static int get_set_conduit_method(struct device_node *np)
 {
 	const char *method;
 
-	pr_info("probing for conduit method from DT.\n");
+	pr_debug("probing for conduit method from DT.\n");
 
 	if (of_property_read_string(np, "method", &method)) {
 		pr_warn("missing \"method\" property\n");
@@ -377,7 +401,7 @@ static void __init psci_init_migrate(void)
 	type = psci_ops.migrate_info_type();
 
 	if (type == PSCI_0_2_TOS_MP) {
-		pr_info("Trusted OS migration not required\n");
+		pr_debug("Trusted OS migration not required\n");
 		return;
 	}
 
@@ -432,7 +456,7 @@ static void __init psci_init_smccc(void)
 
 static void __init psci_0_2_set_functions(void)
 {
-	pr_info("Using standard PSCI v0.2 function IDs\n");
+	pr_debug("Using standard PSCI v0.2 function IDs\n");
 	psci_ops.get_version = psci_get_version;
 
 	psci_function_id[PSCI_FN_CPU_SUSPEND] =
@@ -464,7 +488,7 @@ static int __init psci_probe(void)
 {
 	u32 ver = psci_get_version();
 
-	pr_info("PSCIv%d.%d detected in firmware.\n",
+	pr_debug("PSCIv%d.%d detected in firmware.\n",
 			PSCI_VERSION_MAJOR(ver),
 			PSCI_VERSION_MINOR(ver));
 

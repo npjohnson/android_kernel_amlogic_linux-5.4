@@ -92,6 +92,7 @@ config BROKEN_ON_SMP
 
 config INIT_ENV_ARG_LIMIT
 	int
+	default 128 if AMLOGIC_MODIFY
 	default 32 if !UML
 	default 128 if UML
 	help
@@ -608,6 +609,16 @@ config IKCONFIG_PROC
 
 config IKHEADERS
 	tristate "Enable kernel headers through /sys/kernel/kheaders.tar.xz"
+	depends on SYSFS
+	help
+	  This option enables access to the in-kernel headers that are generated during
+	  the build process. These can be used to build eBPF tracing programs,
+	  or similar programs.  If you build the headers as a module, a module called
+	  kheaders.ko is built which can be loaded on-demand to get access to headers.
+
+config AMLOGIC_IKHEADERS
+	tristate "Enable kernel headers through /sys/kernel/kheaders.tar.xz (Amlogic)"
+	default n
 	depends on SYSFS
 	help
 	  This option enables access to the in-kernel headers that are generated during
@@ -1646,6 +1657,14 @@ config BPF_JIT_ALWAYS_ON
 	help
 	  Enables BPF JIT and removes BPF interpreter to avoid
 	  speculative execution of BPF instructions by the interpreter
+
+config BPF_JIT_ALWAYS_ON_AMLOGIC
+	bool "Permanently enable BPF JIT and remove BPF interpreter for Amlogic"
+	default y
+	depends on BPF_SYSCALL && HAVE_EBPF_JIT && BPF_JIT_AMLOGIC
+	help
+	  real effective config for Amlogic
+	  we should disable it in arm
 
 config BPF_UNPRIV_DEFAULT_OFF
 	bool "Disable unprivileged BPF by default"

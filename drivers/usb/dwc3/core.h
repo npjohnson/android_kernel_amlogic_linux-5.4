@@ -255,6 +255,11 @@
 #define DWC3_GUCTL1_PARKMODE_DISABLE_SS	BIT(17)
 #define DWC3_GUCTL1_TX_IPGAP_LINECHECK_DIS	BIT(28)
 #define DWC3_GUCTL1_DEV_L1_EXIT_BY_HW	BIT(24)
+#ifdef CONFIG_AMLOGIC_USB
+#define DWC3_GUCTL_NAKPERENHHS			 BIT(18)
+#define DWC3_GUCTL_PARKMODEDISABLESS	 BIT(17)
+#endif
+
 
 /* Global Status Register */
 #define DWC3_GSTS_OTG_IP	BIT(10)
@@ -1257,7 +1262,12 @@ struct dwc3 {
 	unsigned		dis_split_quirk:1;
 
 	u16			imod_interval;
-
+#ifdef CONFIG_AMLOGIC_USB
+	unsigned		super_speed_support:1;
+	struct regulator *usb_regulator_ao1v8;
+	struct regulator *usb_regulator_ao3v3;
+	struct regulator *usb_regulator_vcc5v;
+#endif
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);

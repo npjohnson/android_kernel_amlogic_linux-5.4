@@ -26,6 +26,9 @@
 
 #include <asm/irq_regs.h>
 #include <linux/kvm_para.h>
+#ifdef CONFIG_AMLOGIC_DEBUG_LOCKUP
+#include <linux/amlogic/debug_lockup.h>
+#endif
 
 static DEFINE_MUTEX(watchdog_mutex);
 
@@ -41,7 +44,11 @@ unsigned long __read_mostly watchdog_enabled;
 int __read_mostly watchdog_user_enabled = 1;
 int __read_mostly nmi_watchdog_user_enabled = NMI_WATCHDOG_DEFAULT;
 int __read_mostly soft_watchdog_user_enabled = 1;
+#ifdef CONFIG_AMLOGIC_MODIFY
+int __read_mostly watchdog_thresh = 5;
+#else
 int __read_mostly watchdog_thresh = 10;
+#endif
 static int __read_mostly nmi_watchdog_available;
 
 static struct cpumask watchdog_allowed_mask __read_mostly;
@@ -174,10 +181,10 @@ static DEFINE_PER_CPU(unsigned long, watchdog_touch_ts);
 static DEFINE_PER_CPU(struct hrtimer, watchdog_hrtimer);
 static DEFINE_PER_CPU(bool, softlockup_touch_sync);
 static DEFINE_PER_CPU(bool, soft_watchdog_warn);
-static DEFINE_PER_CPU(unsigned long, hrtimer_interrupts);
+DEFINE_PER_CPU(unsigned long, hrtimer_interrupts);
 static DEFINE_PER_CPU(unsigned long, soft_lockup_hrtimer_cnt);
 static DEFINE_PER_CPU(struct task_struct *, softlockup_task_ptr_saved);
-static DEFINE_PER_CPU(unsigned long, hrtimer_interrupts_saved);
+DEFINE_PER_CPU(unsigned long, hrtimer_interrupts_saved);
 static unsigned long soft_lockup_nmi_warn;
 
 static int __init softlockup_panic_setup(char *str)
@@ -339,6 +346,13 @@ static void watchdog_interrupt_count(void)
 	__this_cpu_inc(hrtimer_interrupts);
 }
 
+#ifdef CONFIG_AMLOGIC_DEBUG_LOCKUP
+unsigned long watchdog_get_interrupt_count_cpu(int cpu)
+{
+	return per_cpu(hrtimer_interrupts, cpu);
+}
+#endif
+
 static DEFINE_PER_CPU(struct completion, softlockup_completion);
 static DEFINE_PER_CPU(struct cpu_stop_work, softlockup_stop_work);
 
@@ -373,6 +387,11 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 
 	/* kick the hardlockup detector */
 	watchdog_interrupt_count();
+
+#ifdef CONFIG_HARDLOCKUP_DETECTOR_OTHER_CPU
+	/* test for hardlockups on the next cpu */
+	watchdog_check_hardlockup_other_cpu();
+#endif
 
 	/* kick the softlockup detector */
 	if (completion_done(this_cpu_ptr(&softlockup_completion))) {
@@ -502,6 +521,9 @@ static void watchdog_enable(unsigned int cpu)
 	/* Enable the perf event */
 	if (watchdog_enabled & NMI_WATCHDOG_ENABLED)
 		watchdog_nmi_enable(cpu);
+#ifdef CONFIG_HARDLOCKUP_DETECTOR_OTHER_CPU
+	watchdog_nmi_enable(cpu);
+#endif
 }
 
 static void watchdog_disable(unsigned int cpu)

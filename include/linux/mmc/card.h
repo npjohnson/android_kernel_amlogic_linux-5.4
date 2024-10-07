@@ -222,7 +222,7 @@ struct mmc_queue_req;
 #define MMC_NUM_BOOT_PARTITION	2
 #define MMC_NUM_GP_PARTITION	4
 #define MMC_NUM_PHY_PARTITION	7
-#define MAX_MMC_PART_NAME_LEN	20
+#define MAX_MMC_PART_NAME_LEN	16
 
 /*
  * MMC Physical partitions
@@ -311,6 +311,7 @@ struct mmc_card {
 	struct dentry		*debugfs_root;
 	struct mmc_part	part[MMC_NUM_PHY_PARTITION]; /* physical partitions */
 	unsigned int    nr_parts;
+	unsigned int    key_stamp;
 
 	unsigned int		bouncesz;	/* Bounce buffer size */
 	struct workqueue_struct *complete_wq;	/* Private workqueue */

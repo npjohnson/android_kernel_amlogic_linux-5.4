@@ -40,6 +40,10 @@
 #include <asm/tlbflush.h>
 #include <asm/traps.h>
 
+#ifdef CONFIG_AMLOGIC_VMALLOC_SHRINKER
+#include <linux/amlogic/vmalloc_shrinker.h>
+#endif
+
 struct fault_info {
 	int	(*fn)(unsigned long addr, unsigned int esr,
 		      struct pt_regs *regs);
@@ -305,6 +309,10 @@ static void __do_kernel_fault(unsigned long addr, unsigned int esr,
 {
 	const char *msg;
 
+#ifdef CONFIG_AMLOGIC_VMALLOC_SHRINKER
+	if (!handle_vmalloc_fault(regs, addr))
+		return;
+#endif
 	/*
 	 * Are we prepared to handle this kernel fault?
 	 * We are almost certainly not prepared to handle instruction faults.
@@ -660,6 +668,9 @@ static int do_sea(unsigned long addr, unsigned int esr, struct pt_regs *regs)
 		siaddr = NULL;
 	else
 		siaddr  = (void __user *)addr;
+#ifdef CONFIG_AMLOGIC_USER_FAULT
+	_dump_dmc_reg();
+#endif /* CONFIG_AMLOGIC_USER_FAULT */
 	arm64_notify_die(inf->name, regs, inf->sig, inf->code, siaddr, esr);
 
 	return 0;

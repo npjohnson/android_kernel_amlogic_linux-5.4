@@ -82,6 +82,11 @@ static struct bio *mpage_bio_submit(int op, int op_flags, struct bio *bio)
 		struct page *first_page = bio->bi_io_vec[0].bv_page;
 
 		if (first_page != NULL) {
+		#ifdef CONFIG_AMLOGIC_VMAP
+			trace_android_fs_dataread_wrap(first_page->mapping->host,
+						page_offset(first_page),
+						bio->bi_iter.bi_size);
+		#else
 			char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
 
 			path = android_fstrace_get_pathname(pathbuf,
@@ -94,6 +99,7 @@ static struct bio *mpage_bio_submit(int op, int op_flags, struct bio *bio)
 				current->pid,
 				path,
 				current->comm);
+		#endif
 		}
 	}
 	bio->bi_end_io = mpage_end_io;
@@ -447,6 +453,26 @@ mpage_readpages(struct address_space *mapping, struct list_head *pages,
 	return 0;
 }
 EXPORT_SYMBOL(mpage_readpages);
+
+void mpage_readahead(struct readahead_control *rac, get_block_t get_block)
+{
+	struct page *page;
+	struct mpage_readpage_args args = {
+		.get_block = get_block,
+		.is_readahead = true,
+	};
+
+	while ((page = readahead_page(rac))) {
+		prefetchw(&page->flags);
+		args.page = page;
+		args.nr_pages = readahead_count(rac);
+		args.bio = do_mpage_readpage(&args);
+		put_page(page);
+	}
+	if (args.bio)
+		mpage_bio_submit(REQ_OP_READ, REQ_RAHEAD, args.bio);
+}
+EXPORT_SYMBOL(mpage_readahead);
 
 /*
  * This isn't called much at all

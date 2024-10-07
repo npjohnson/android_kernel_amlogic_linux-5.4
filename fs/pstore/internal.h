@@ -6,6 +6,10 @@
 #include <linux/time.h>
 #include <linux/pstore.h>
 
+#ifdef CONFIG_AMLOGIC_DEBUG_FTRACE_PSTORE
+extern bool console_enable;
+#endif
+
 #define PSTORE_DEFAULT_KMSG_BYTES 10240
 extern unsigned long kmsg_bytes;
 

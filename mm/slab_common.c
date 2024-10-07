@@ -60,7 +60,11 @@ static DECLARE_WORK(slab_caches_to_rcu_destroy_work,
 /*
  * Merge control. If this is set then no merging of slab caches will occur.
  */
+#ifdef CONFIG_AMLOGIC_SLAB_TRACE
+static bool slab_nomerge = true;
+#else
 static bool slab_nomerge = !IS_ENABLED(CONFIG_SLAB_MERGE_DEFAULT);
+#endif
 
 static int __init setup_slab_nomerge(char *str)
 {
@@ -1328,6 +1332,57 @@ void __init create_kmalloc_caches(slab_flags_t flags)
 }
 #endif /* !CONFIG_SLOB */
 
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+#ifdef CONFIG_AMLOGIC_PAGE_TRACE
+#include <linux/amlogic/page_trace.h>
+#endif
+
+static inline void *aml_slub_alloc_large(size_t size, gfp_t flags, int order)
+{
+	struct page *page, *p;
+
+	flags &= ~__GFP_COMP;
+	page = alloc_pages(flags, order);
+	if (page) {
+		unsigned long used_pages = PAGE_ALIGN(size) / PAGE_SIZE;
+		unsigned long total_pages = 1 << order;
+		unsigned long saved = 0;
+		unsigned long fun = 0;
+		int i;
+
+		/* record how many pages in first page*/
+		__SetPageHead(page);
+		SetPageOwnerPriv1(page);	/* special flag */
+
+	#ifdef CONFIG_AMLOGIC_PAGE_TRACE
+		fun = get_page_trace(page);
+	#endif
+
+		for (i = 1; i < used_pages; i++) {
+			p = page + i;
+			set_compound_head(p, page);
+		#ifdef CONFIG_AMLOGIC_PAGE_TRACE
+			set_page_trace(page, 0, flags, (void *)fun);
+		#endif
+		}
+		page->index = used_pages;
+		split_page(page, order);
+		p = page + used_pages;
+		while (used_pages < total_pages) {
+			__free_pages(p, 0);
+			used_pages++;
+			p++;
+			saved++;
+		}
+		pr_debug("%s, page:%p, all:%5ld, size:%5ld, save:%5ld, f:%ps\n",
+			__func__, page_address(page), total_pages * PAGE_SIZE,
+			(long)size, saved * PAGE_SIZE, (void *)fun);
+		return page;
+	}
+	return NULL;
+}
+#endif
+
 /*
  * To avoid unnecessary overhead, we pass through large allocation requests
  * directly to the page allocator. We use __GFP_COMP, because we will need to
@@ -1339,11 +1394,24 @@ void *kmalloc_order(size_t size, gfp_t flags, unsigned int order)
 	struct page *page;
 
 	flags |= __GFP_COMP;
-	page = alloc_pages(flags, order);
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	if (size < (PAGE_SIZE * (1 << order)))
+		page = aml_slub_alloc_large(size, flags, order);
+	else
+#endif
+		page = alloc_pages(flags, order);
+
 	if (likely(page)) {
 		ret = page_address(page);
+		#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+		mod_node_page_state(page_pgdat(page), NR_SLAB_UNRECLAIMABLE,
+				    PAGE_ALIGN(size) / PAGE_SIZE);
+		mod_node_page_state(page_pgdat(page), NR_SLAB_UNRECLAIMABLE_O,
+				    PAGE_ALIGN(size) / PAGE_SIZE);
+		#else
 		mod_node_page_state(page_pgdat(page), NR_SLAB_UNRECLAIMABLE,
 				    1 << order);
+		#endif
 	}
 	ret = kasan_kmalloc_large(ret, size, flags);
 	/* As ret might get tagged, call kmemleak hook after KASAN. */
@@ -1427,12 +1495,22 @@ static void print_slabinfo_header(struct seq_file *m)
 #else
 	seq_puts(m, "slabinfo - version: 2.1\n");
 #endif
+
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	/* add total bytes for each slab */
+	seq_puts(m, "# name                        <active_objs> <num_objs> ");
+	seq_puts(m, "<objsize> <objperslab> <pagesperslab>");
+#else
 	seq_puts(m, "# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab>");
+#endif /* CONFIG_AMLOGIC_MEMORY_EXTEND */
 	seq_puts(m, " : tunables <limit> <batchcount> <sharedfactor>");
 	seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
 #ifdef CONFIG_DEBUG_SLAB
 	seq_puts(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> <error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
 	seq_puts(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
+#endif
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	seq_puts(m, " : <total bytes> <reclaim>");
 #endif
 	seq_putc(m, '\n');
 }
@@ -1477,20 +1555,35 @@ memcg_accumulate_slabinfo(struct kmem_cache *s, struct slabinfo *info)
 static void cache_show(struct kmem_cache *s, struct seq_file *m)
 {
 	struct slabinfo sinfo;
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	char name[32];
+	long total;
+#endif
 
 	memset(&sinfo, 0, sizeof(sinfo));
 	get_slabinfo(s, &sinfo);
 
 	memcg_accumulate_slabinfo(s, &sinfo);
 
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	strncpy(name, cache_name(s), 31);
+	seq_printf(m, "%-31s %6lu %6lu %6u %4u %4d",
+		   name, sinfo.active_objs, sinfo.num_objs, s->size,
+		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
+#else
 	seq_printf(m, "%-17s %6lu %6lu %6u %4u %4d",
 		   cache_name(s), sinfo.active_objs, sinfo.num_objs, s->size,
 		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
-
+#endif /* CONFIG_AMLOGIC_MEMORY_EXTEND */
 	seq_printf(m, " : tunables %4u %4u %4u",
 		   sinfo.limit, sinfo.batchcount, sinfo.shared);
 	seq_printf(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
+#ifdef CONFIG_AMLOGIC_MEMORY_EXTEND
+	total = sinfo.num_objs * s->size;
+	seq_printf(m, "%8lu, %s", total,
+		   (s->flags & SLAB_RECLAIM_ACCOUNT) ? "S_R" : "S_U");
+#endif
 	slabinfo_show_stats(m, s);
 	seq_putc(m, '\n');
 }

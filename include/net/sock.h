@@ -476,6 +476,9 @@ struct sock {
 	spinlock_t		sk_peer_lock;
 #else
 	/* sk_peer_lock is in the ANDROID_KABI_RESERVE(1) field below */
+#ifdef CONFIG_AMLOGIC_MODIFY
+	spinlock_t		sk_peer_lock;
+#endif
 #endif
 	struct pid		*sk_peer_pid;
 	const struct cred	*sk_peer_cred;
@@ -2604,6 +2607,7 @@ extern int sysctl_optmem_max;
 extern __u32 sysctl_wmem_default;
 extern __u32 sysctl_rmem_default;
 
+#define SKB_FRAG_PAGE_ORDER	get_order(32768)
 DECLARE_STATIC_KEY_FALSE(net_high_order_alloc_disable_key);
 
 static inline int sk_get_wmem0(const struct sock *sk, const struct proto *proto)

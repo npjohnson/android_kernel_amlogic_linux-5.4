@@ -1087,7 +1087,11 @@ static int spi_transfer_wait(struct spi_controller *ctlr,
 			return -EINTR;
 		}
 	} else {
+#ifdef CONFIG_AMLOGIC_MODIFY
+		ms = 32LL * 1000LL * xfer->len;
+#else
 		ms = 8LL * 1000LL * xfer->len;
+#endif
 		do_div(ms, xfer->speed_hz);
 		ms += ms + 200; /* some tolerance */
 
@@ -3322,6 +3326,10 @@ static int __spi_validate(struct spi_device *spi, struct spi_message *message)
 			w_size = 1;
 		else if (xfer->bits_per_word <= 16)
 			w_size = 2;
+#ifdef CONFIG_AMLOGIC_MODIFY
+		else if (xfer->bits_per_word > 32)
+			w_size = 8;
+#endif
 		else
 			w_size = 4;
 

@@ -324,6 +324,12 @@ struct dma_buf *ion_alloc(size_t len, unsigned int heap_id_mask,
  */
 int ion_free(struct ion_buffer *buffer);
 
+#ifdef CONFIG_AMLOGIC_ION
+int meson_ion_cma_heap_match(const char *name);
+void meson_ion_cma_heap_id_set(unsigned int id);
+struct device *meson_ion_get_dev(void);
+#endif
+
 /**
  * ion_query_heaps_kernel - Returns information about available heaps to
  * in-kernel clients.

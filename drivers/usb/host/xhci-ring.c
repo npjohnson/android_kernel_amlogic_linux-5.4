@@ -55,6 +55,10 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/dma-mapping.h>
+#ifdef CONFIG_AMLOGIC_USB
+#include <linux/amlogic/cpu_version.h>
+#endif
+
 #include "xhci.h"
 #include "xhci-trace.h"
 
@@ -413,6 +417,13 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	if ((ep_state & EP_STOP_CMD_PENDING) || (ep_state & SET_DEQ_PENDING) ||
 	    (ep_state & EP_HALTED) || (ep_state & EP_CLEARING_TT))
 		return;
+
+#ifdef CONFIG_AMLOGIC_USB
+	if (xhci->quirks & XHCI_CRG_HOST)
+		if (db_wait == 1)
+			return;
+#endif
+
 	writel(DB_VALUE(ep_index, stream_id), db_addr);
 	/* The CPU has better things to do at this point than wait for a
 	 * write-posting flush.  It'll get there soon enough.
@@ -968,6 +979,9 @@ static void xhci_kill_endpoint_urbs(struct xhci_hcd *xhci,
 void xhci_hc_died(struct xhci_hcd *xhci)
 {
 	int i, j;
+#ifdef CONFIG_AMLOGIC_USB
+	struct usb_hcd *hcd = xhci_to_hcd(xhci);
+#endif
 
 	if (xhci->xhc_state & XHCI_STATE_DYING)
 		return;
@@ -988,6 +1002,12 @@ void xhci_hc_died(struct xhci_hcd *xhci)
 	/* inform usb core hc died if PCI remove isn't already handling it */
 	if (!(xhci->xhc_state & XHCI_STATE_REMOVING))
 		usb_hc_died(xhci_to_hcd(xhci));
+#ifdef CONFIG_AMLOGIC_USB
+	if (hcd->primary_hcd)
+		hcd->primary_hcd->crg_do_reset = 1;
+	else
+		hcd->crg_do_reset = 1;
+#endif
 }
 
 /* Watchdog timer function for when a stop endpoint command fails to complete.
@@ -2320,8 +2340,20 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
 	case COMP_SUCCESS:
 		ep_ring->err_count = 0;
 		/* handle success with untransferred data as short packet */
+#ifdef CONFIG_AMLOGIC_USB
+		if (td->urb->need_event_data) {
+			td->urb->actual_length = requested;
+			remaining = 0;
+		}
+#endif
 		if (ep_trb != td->last_trb || remaining) {
+#ifdef CONFIG_AMLOGIC_USB
+			if (!td->urb->need_event_data)
+				xhci_warn(xhci, "WARN Successful completion on short TX\n");
+#else
 			xhci_warn(xhci, "WARN Successful completion on short TX\n");
+#endif
+
 			xhci_dbg(xhci, "ep %#x - asked for %d bytes, %d bytes untransferred\n",
 				 td->urb->ep->desc.bEndpointAddress,
 				 requested, remaining);
@@ -2411,9 +2443,24 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	ep_ctx = xhci_get_ep_ctx(xhci, xdev->out_ctx, ep_index);
 
 	if (GET_EP_CTX_STATE(ep_ctx) == EP_STATE_DISABLED) {
+#ifdef CONFIG_AMLOGIC_USB
+		if ((xhci->quirks & XHCI_CRG_HOST) &&
+			(is_meson_t5_cpu() || is_meson_t5d_cpu())) {
+			if (!db_wait)
+				xhci_err(xhci,
+					"ERROR Transfer event for disabled endpoint slot %u ep %u\n",
+					slot_id, ep_index);
+		} else {
+			xhci_err(xhci,
+				"ERROR Transfer event for disabled endpoint slot %u ep %u\n",
+				slot_id, ep_index);
+		}
+#else
 		xhci_err(xhci,
 			 "ERROR Transfer event for disabled endpoint slot %u ep %u\n",
-			  slot_id, ep_index);
+			 slot_id, ep_index);
+
+#endif
 		goto err_out;
 	}
 
@@ -2453,12 +2500,17 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		if (EVENT_TRB_LEN(le32_to_cpu(event->transfer_len)) == 0)
 			break;
 		if (xhci->quirks & XHCI_TRUST_TX_LENGTH ||
-		    ep_ring->last_td_was_short)
+		    ep_ring->last_td_was_short) {
 			trb_comp_code = COMP_SHORT_PACKET;
-		else
+		} else {
+#ifdef CONFIG_AMLOGIC_USB
+			;
+#else
 			xhci_warn_ratelimited(xhci,
 					      "WARN Successful completion on short TX for slot %u ep %u: needs XHCI_TRUST_TX_LENGTH quirk?\n",
 					      slot_id, ep_index);
+#endif
+		}
 	case COMP_SHORT_PACKET:
 		break;
 	/* Completion codes for endpoint stopped state */
@@ -2737,14 +2789,39 @@ cleanup:
 	return 0;
 
 err_out:
-	xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
-		 (unsigned long long) xhci_trb_virt_to_dma(
-			 xhci->event_ring->deq_seg,
+#ifdef CONFIG_AMLOGIC_USB
+	if ((xhci->quirks & XHCI_CRG_HOST) &&
+			(is_meson_t5_cpu() || is_meson_t5d_cpu())) {
+		if (!db_wait)
+			xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
+				 (unsigned long long)xhci_trb_virt_to_dma
+				 (xhci->event_ring->deq_seg,
+				 xhci->event_ring->dequeue),
+				 lower_32_bits(le64_to_cpu(event->buffer)),
+				 upper_32_bits(le64_to_cpu(event->buffer)),
+				 le32_to_cpu(event->transfer_len),
+				 le32_to_cpu(event->flags));
+	} else {
+		xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
+			(unsigned long long)xhci_trb_virt_to_dma
+			(xhci->event_ring->deq_seg,
 			 xhci->event_ring->dequeue),
+			lower_32_bits(le64_to_cpu(event->buffer)),
+			upper_32_bits(le64_to_cpu(event->buffer)),
+			le32_to_cpu(event->transfer_len),
+			le32_to_cpu(event->flags));
+	}
+#else
+	xhci_err(xhci, "@%016llx %08x %08x %08x %08x\n",
+		 (unsigned long long)xhci_trb_virt_to_dma
+		 (xhci->event_ring->deq_seg,
+		 xhci->event_ring->dequeue),
 		 lower_32_bits(le64_to_cpu(event->buffer)),
 		 upper_32_bits(le64_to_cpu(event->buffer)),
 		 le32_to_cpu(event->transfer_len),
 		 le32_to_cpu(event->flags));
+
+#endif
 	return -ENODEV;
 }
 
@@ -2957,9 +3034,15 @@ irqreturn_t xhci_msi_irq(int irq, void *hcd)
  * @more_trbs_coming:	Will you enqueue more TRBs before calling
  *			prepare_transfer()?
  */
+#ifdef CONFIG_AMLOGIC_USB
+void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
+		bool more_trbs_coming,
+		u32 field1, u32 field2, u32 field3, u32 field4)
+#else
 static void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		bool more_trbs_coming,
 		u32 field1, u32 field2, u32 field3, u32 field4)
+#endif
 {
 	struct xhci_generic_trb *trb;
 
@@ -3361,7 +3444,15 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	int sent_len, ret;
 	u32 field, length_field, remainder;
 	u64 addr, send_addr;
+#ifdef CONFIG_AMLOGIC_USB
+	u64 event_data_ptr;
 
+	if ((le16_to_cpu(urb->dev->parent->descriptor.idVendor) == 0x0BDA) &&
+		urb->dev->speed == USB_SPEED_LOW &&
+		(usb_endpoint_xfer_int(&urb->ep->desc)) &&
+		(xhci->quirks & XHCI_CRG_HOST))
+		urb->need_event_data = 1;
+#endif
 	ring = xhci_urb_to_transfer_ring(xhci, urb);
 	if (!ring)
 		return -EINVAL;
@@ -3379,9 +3470,22 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		addr = (u64) urb->transfer_dma;
 		block_len = full_len;
 	}
+#ifdef CONFIG_AMLOGIC_USB
+	if (urb->need_event_data) {
+		ret = prepare_transfer(xhci, xhci->devs[slot_id],
+			ep_index, urb->stream_id,
+			num_trbs + 1, urb, 0, mem_flags);
+	} else {
+		ret = prepare_transfer(xhci, xhci->devs[slot_id],
+			ep_index, urb->stream_id,
+			num_trbs, urb, 0, mem_flags);
+	}
+#else
 	ret = prepare_transfer(xhci, xhci->devs[slot_id],
 			ep_index, urb->stream_id,
 			num_trbs, urb, 0, mem_flags);
+
+#endif
 	if (unlikely(ret < 0))
 		return ret;
 
@@ -3438,9 +3542,24 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			}
 		}
 		if (enqd_len + trb_buff_len >= full_len) {
+#ifdef CONFIG_AMLOGIC_USB
+			if (urb->need_event_data) {
+				field |= TRB_CHAIN;
+				field &= ~TRB_IOC;
+				more_trbs_coming = true;
+				event_data_ptr = ring->enq_seg->dma +
+					(le64_to_cpu((long)ring->enqueue) -
+					le64_to_cpu((long)ring->enq_seg->trbs));
+			} else {
+				field &= ~TRB_CHAIN;
+				field |= TRB_IOC;
+				more_trbs_coming = false;
+			}
+#else
 			field &= ~TRB_CHAIN;
 			field |= TRB_IOC;
 			more_trbs_coming = false;
+#endif
 			td->last_trb = ring->enqueue;
 
 			if (xhci_urb_suitable_for_idt(urb)) {
@@ -3486,7 +3605,16 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		block_len -= sent_len;
 		send_addr = addr;
 	}
-
+#ifdef CONFIG_AMLOGIC_USB
+	if (urb->need_event_data) {
+		field = TRB_TYPE(TRB_EVENT_DATA) | ring->cycle_state | TRB_IOC;
+		urb_priv->td[0].last_trb = ring->enqueue;
+		queue_trb(xhci, ring, false,
+			lower_32_bits(event_data_ptr),
+			upper_32_bits(event_data_ptr),
+			TRB_INTR_TARGET(0), field);
+	}
+#endif
 	if (need_zero_pkt) {
 		ret = prepare_transfer(xhci, xhci->devs[slot_id],
 				       ep_index, urb->stream_id,
@@ -3501,6 +3629,168 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			start_cycle, start_trb);
 	return 0;
 }
+
+#ifdef CONFIG_AMLOGIC_USB
+int xhci_test_single_step(struct xhci_hcd *xhci, gfp_t mem_flags,
+			  struct urb *urb, int slot_id,
+			  unsigned int ep_index, int testflag)
+{
+	struct xhci_ring *ep_ring;
+	int num_trbs;
+	int ret;
+	struct usb_ctrlrequest *setup;
+	struct xhci_generic_trb *start_trb;
+	int start_cycle;
+	u32 field, length_field, remainder;
+	struct urb_priv *urb_priv;
+	struct xhci_td *td;
+	unsigned long flags = 0;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+
+	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
+	if (!ep_ring) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		return -EINVAL;
+	}
+
+	/*
+	 * Need to copy setup packet into setup TRB, so we can't use the setup
+	 * DMA address.
+	 */
+	if (!urb->setup_packet) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		return -EINVAL;
+	}
+
+	/* 1 TRB for setup, 1 for status */
+	num_trbs = 2;
+	/*
+	 * Don't need to check if we need additional event data and normal TRBs,
+	 * since data in control transfers will never get bigger than 16MB
+	 * XXX: can we get a buffer that crosses 64KB boundaries?
+	 */
+	if (urb->transfer_buffer_length > 0)
+		num_trbs++;
+	ret = prepare_transfer(xhci, xhci->devs[slot_id],
+			       ep_index, urb->stream_id,
+			       num_trbs, urb, 0, mem_flags);
+	if (ret < 0) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		return ret;
+	}
+
+	urb_priv = urb->hcpriv;
+	td = urb_priv->td;
+
+	/*
+	 * Don't give the first TRB to the hardware (by toggling the cycle bit)
+	 * until we've finished creating all the other TRBs.  The ring's cycle
+	 * state may change as we enqueue the other TRBs, so save it too.
+	 */
+	start_trb = &ep_ring->enqueue->generic;
+	start_cycle = ep_ring->cycle_state;
+
+	/* Queue setup TRB - see section 6.4.1.2.1 */
+	/* FIXME better way to translate setup_packet into two u32 fields? */
+	setup = (struct usb_ctrlrequest *)urb->setup_packet;
+	field = 0;
+	field |= TRB_IDT | TRB_TYPE(TRB_SETUP);
+	if (start_cycle == 0)
+		field |= 0x1;
+
+	/* xHCI 1.0/1.1 6.4.1.2.1: Transfer Type field */
+	if (xhci->hci_version >= 0x100 || (xhci->quirks & XHCI_MTK_HOST)) {
+		if (urb->transfer_buffer_length > 0) {
+			if (setup->bRequestType & USB_DIR_IN)
+				field |= TRB_TX_TYPE(TRB_DATA_IN);
+			else
+				field |= TRB_TX_TYPE(TRB_DATA_OUT);
+		}
+	}
+
+	queue_trb(xhci, ep_ring, true,
+		  setup->bRequestType | setup->bRequest << 8 |
+		  le16_to_cpu(setup->wValue) << 16,
+		  le16_to_cpu(setup->wIndex) |
+		  le16_to_cpu(setup->wLength) << 16,
+		  TRB_LEN(8) | TRB_INTR_TARGET(0),
+		  /* Immediate data in pointer */
+		  field);
+	giveback_first_trb(xhci, slot_id, ep_index, 0,
+			   start_cycle, start_trb);
+
+	/* 15 second delay per the test spec */
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	xhci_err(xhci, "step 1\n");
+	msleep(30000);
+	spin_lock_irqsave(&xhci->lock, flags);
+
+	start_trb = &ep_ring->enqueue->generic;
+	start_cycle = ep_ring->cycle_state;
+
+	/* If there's data, queue data TRBs */
+	/* Only set interrupt on short packet for IN endpoints */
+	if (usb_urb_dir_in(urb))
+		field = TRB_ISP | TRB_TYPE(TRB_DATA);
+	else
+		field = TRB_TYPE(TRB_DATA);
+
+	remainder = xhci_td_remainder(xhci, 0,
+				      urb->transfer_buffer_length,
+				      urb->transfer_buffer_length,
+				      urb, 1);
+
+	length_field = TRB_LEN(urb->transfer_buffer_length) |
+		TRB_TD_SIZE(remainder) |
+		TRB_INTR_TARGET(0);
+
+	if (urb->transfer_buffer_length > 0) {
+		if (setup->bRequestType & USB_DIR_IN)
+			field |= TRB_DIR_IN;
+		queue_trb(xhci, ep_ring, true,
+			  lower_32_bits(urb->transfer_dma),
+			  upper_32_bits(urb->transfer_dma),
+			  length_field,
+			  field | ep_ring->cycle_state);
+		giveback_first_trb(xhci, slot_id, ep_index, 0,
+				   start_cycle, start_trb);
+	}
+
+	/* 15 second delay per the test spec */
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	xhci_err(xhci, "step 2\n");
+	msleep(30000);
+	spin_lock_irqsave(&xhci->lock, flags);
+
+	/* Save the DMA address of the last TRB in the TD */
+	td->last_trb = ep_ring->enqueue;
+
+	/* Queue status TRB - see Table 7 and sections 4.11.2.2 and 6.4.1.2.3 */
+	/* If the device sent data, the status stage is an OUT transfer */
+	if (urb->transfer_buffer_length > 0 && setup->bRequestType & USB_DIR_IN)
+		field = 0;
+	else
+		field = TRB_DIR_IN;
+	queue_trb(xhci, ep_ring, false,
+		  0,
+		  0,
+		  TRB_INTR_TARGET(0),
+			/* Event on completion */
+		  field | TRB_IOC |
+		  TRB_TYPE(TRB_STATUS) | ep_ring->cycle_state);
+
+	giveback_first_trb(xhci, slot_id, ep_index, 0,
+			   start_cycle, start_trb);
+
+	/* 15 second delay per the test spec */
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	xhci_err(xhci, "step 3\n");
+	msleep(30000);
+
+	return 0;
+}
+#endif
 
 /* Caller must have locked xhci->lock */
 int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
@@ -3798,6 +4088,16 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	struct xhci_virt_ep *xep;
 	int frame_id;
 
+#ifdef CONFIG_AMLOGIC_USB
+	u64 event_data_ptr;
+
+	if ((xhci->quirks & XHCI_CRG_DRD) || (xhci->quirks & XHCI_CRG_HOST))
+		if ((le16_to_cpu(urb->dev->descriptor.bDeviceClass) == 0xef) &&
+			urb->dev->speed >= USB_SPEED_SUPER) {
+			urb->need_event_data_flag = 1;
+		}
+#endif
+
 	xep = &xhci->devs[slot_id]->eps[ep_index];
 	ep_ring = xhci->devs[slot_id]->eps[ep_index].ring;
 
@@ -3834,6 +4134,10 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 
 		trbs_per_td = count_isoc_trbs_needed(urb, i);
 
+#ifdef CONFIG_AMLOGIC_USB
+		if (urb->need_event_data_flag)
+			trbs_per_td++;
+#endif
 		ret = prepare_transfer(xhci, xhci->devs[slot_id], ep_index,
 				urb->stream_id, trbs_per_td, urb, i, mem_flags);
 		if (ret < 0) {
@@ -3878,6 +4182,14 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			if (usb_urb_dir_in(urb))
 				field |= TRB_ISP;
 
+#ifdef CONFIG_AMLOGIC_USB
+			if ((j == (trbs_per_td - 2)) &&
+				urb->need_event_data_flag)
+				event_data_ptr = ep_ring->enq_seg->dma +
+					(le64_to_cpu((long)ep_ring->enqueue) -
+					le64_to_cpu((long)ep_ring->enq_seg->trbs));
+#endif
+
 			/* Set the chain bit for all except the last TRB  */
 			if (j < trbs_per_td - 1) {
 				more_trbs_coming = true;
@@ -3885,7 +4197,15 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			} else {
 				more_trbs_coming = false;
 				td->last_trb = ep_ring->enqueue;
+#ifdef CONFIG_AMLOGIC_USB
+				if (urb->need_event_data_flag)
+					field = TRB_TYPE(TRB_EVENT_DATA) |
+						ep_ring->cycle_state | TRB_IOC;
+				else
+					field |= TRB_IOC;
+#else
 				field |= TRB_IOC;
+#endif
 				/* set BEI, except for the last TD */
 				if (xhci->hci_version >= 0x100 &&
 				    !(xhci->quirks & XHCI_AVOID_BEI) &&
@@ -3912,6 +4232,18 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 				length_field |= TRB_TD_SIZE(remainder);
 			first_trb = false;
 
+#ifdef CONFIG_AMLOGIC_USB
+			if (urb->need_event_data_flag &&
+				(j == (trbs_per_td - 1))) {
+				addr = event_data_ptr;
+				/* amlogic fix */
+				wmb();
+				/* amlogic fix */
+				wmb();
+				/* amlogic fix */
+				wmb();
+			}
+#endif
 			queue_trb(xhci, ep_ring, more_trbs_coming,
 				lower_32_bits(addr),
 				upper_32_bits(addr),
@@ -4166,6 +4498,31 @@ int xhci_queue_stop_endpoint(struct xhci_hcd *xhci, struct xhci_command *cmd,
 	u32 trb_ep_index = EP_ID_FOR_TRB(ep_index);
 	u32 type = TRB_TYPE(TRB_STOP_RING);
 	u32 trb_suspend = SUSPEND_PORT_FOR_TRB(suspend);
+#ifdef CONFIG_AMLOGIC_USB
+	struct usb_hcd		*hcd;
+#endif
+
+#ifdef CONFIG_AMLOGIC_USB
+	if (xhci->quirks & XHCI_CRG_HOST_011) {
+		struct usb_device	*udev = xhci->devs[slot_id]->udev;
+		struct usb_host_endpoint *endpoint;
+
+		if (ep_index % 2)
+			endpoint = udev->ep_out[(ep_index + 1) / 2];
+		else
+			endpoint = udev->ep_in[(ep_index + 1) / 2];
+
+		hcd = bus_to_hcd(udev->bus);
+		if (endpoint && usb_endpoint_xfer_isoc(&endpoint->desc) &&
+			udev->descriptor.bDeviceClass == 0xef &&
+			udev->speed == USB_SPEED_HIGH) {
+			endpoint->xhci = xhci;
+			endpoint->udev = udev;
+			schedule_work(&endpoint->work);
+			udelay(250);
+		}
+	}
+#endif
 
 	return queue_command(xhci, cmd, 0, 0, 0,
 			trb_slot_id | trb_ep_index | type | trb_suspend, false);
